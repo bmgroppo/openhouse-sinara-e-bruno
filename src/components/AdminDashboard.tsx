@@ -4,8 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { Plus, Pencil, Trash2, RotateCcw, ExternalLink, Gift } from "lucide-react";
+import { Plus, Pencil, Trash2, RotateCcw, ExternalLink, Gift, ShoppingBag } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -56,6 +57,9 @@ const AdminDashboard = () => {
   useEffect(() => {
     fetchGifts();
   }, []);
+
+  const availableGifts = gifts.filter((g) => g.is_available);
+  const reservedGifts = gifts.filter((g) => !g.is_available);
 
   const openAdd = () => {
     setEditing(null);
@@ -155,103 +159,158 @@ const AdminDashboard = () => {
     );
   }
 
+  const renderGiftRow = (gift: GiftItem, showActions = true) => (
+    <tr key={gift.id} className="border-b last:border-0">
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-3">
+          {gift.image_url ? (
+            <img src={gift.image_url} alt="" className="h-10 w-10 rounded object-cover" />
+          ) : (
+            <div className="flex h-10 w-10 items-center justify-center rounded bg-muted">
+              <Gift className="h-4 w-4 text-muted-foreground" />
+            </div>
+          )}
+          <div>
+            <p className="font-medium line-clamp-1">{gift.title}</p>
+            <a
+              href={gift.purchase_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-muted-foreground hover:text-primary flex items-center gap-0.5"
+            >
+              Ver link <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        </div>
+      </td>
+      <td className="hidden px-4 py-3 sm:table-cell">
+        <span className="rounded-full bg-secondary px-2 py-0.5 text-xs">
+          {categoryLabels[gift.category]}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        {gift.price ? `R$ ${Number(gift.price).toFixed(2).replace(".", ",")}` : "—"}
+      </td>
+      <td className="px-4 py-3">
+        {gift.is_available ? (
+          <span className="text-xs font-medium text-primary">Disponível</span>
+        ) : (
+          <div>
+            <span className="text-xs font-medium text-accent">Presenteado</span>
+            {gift.guest_name && (
+              <p className="text-xs text-muted-foreground">por {gift.guest_name}</p>
+            )}
+          </div>
+        )}
+      </td>
+      {showActions && (
+        <td className="px-4 py-3">
+          <div className="flex items-center justify-end gap-1">
+            <Button variant="ghost" size="sm" onClick={() => openEdit(gift)}>
+              <Pencil className="h-3.5 w-3.5" />
+            </Button>
+            {!gift.is_available && (
+              <Button variant="ghost" size="sm" onClick={() => handleRelease(gift.id)}>
+                <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" onClick={() => handleDelete(gift.id)} className="text-destructive hover:text-destructive">
+              <Trash2 className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        </td>
+      )}
+    </tr>
+  );
+
   return (
     <div className="mx-auto max-w-7xl px-4 py-8">
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h2 className="font-display text-2xl font-bold">Produtos</h2>
-          <p className="text-sm text-muted-foreground">{gifts.length} itens na lista</p>
+      <Tabs defaultValue="all" className="w-full">
+        <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="font-display text-2xl font-bold">Produtos</h2>
+            <p className="text-sm text-muted-foreground">
+              {gifts.length} itens • {reservedGifts.length} presenteados
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <TabsList>
+              <TabsTrigger value="all">
+                <Gift className="mr-1 h-4 w-4" />
+                Todos ({gifts.length})
+              </TabsTrigger>
+              <TabsTrigger value="reserved">
+                <ShoppingBag className="mr-1 h-4 w-4" />
+                Presenteados ({reservedGifts.length})
+              </TabsTrigger>
+            </TabsList>
+            <Button onClick={openAdd}>
+              <Plus className="mr-1 h-4 w-4" />
+              Adicionar
+            </Button>
+          </div>
         </div>
-        <Button onClick={openAdd}>
-          <Plus className="mr-1 h-4 w-4" />
-          Adicionar Produto
-        </Button>
-      </div>
 
-      {/* Products table */}
-      <div className="overflow-x-auto rounded-lg border bg-card">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b bg-muted/50">
-              <th className="px-4 py-3 text-left font-medium">Produto</th>
-              <th className="hidden px-4 py-3 text-left font-medium sm:table-cell">Categoria</th>
-              <th className="px-4 py-3 text-left font-medium">Preço</th>
-              <th className="px-4 py-3 text-left font-medium">Status</th>
-              <th className="px-4 py-3 text-right font-medium">Ações</th>
-            </tr>
-          </thead>
-          <tbody>
-            {gifts.map((gift) => (
-              <tr key={gift.id} className="border-b last:border-0">
-                <td className="px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    {gift.image_url ? (
-                      <img src={gift.image_url} alt="" className="h-10 w-10 rounded object-cover" />
-                    ) : (
-                      <div className="flex h-10 w-10 items-center justify-center rounded bg-muted">
-                        <Gift className="h-4 w-4 text-muted-foreground" />
-                      </div>
-                    )}
-                    <div>
-                      <p className="font-medium line-clamp-1">{gift.title}</p>
-                      <a
-                        href={gift.purchase_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-muted-foreground hover:text-primary flex items-center gap-0.5"
-                      >
-                        Ver link <ExternalLink className="h-3 w-3" />
-                      </a>
-                    </div>
-                  </div>
-                </td>
-                <td className="hidden px-4 py-3 sm:table-cell">
-                  <span className="rounded-full bg-secondary px-2 py-0.5 text-xs">
-                    {categoryLabels[gift.category]}
-                  </span>
-                </td>
-                <td className="px-4 py-3">
-                  {gift.price ? `R$ ${Number(gift.price).toFixed(2).replace(".", ",")}` : "—"}
-                </td>
-                <td className="px-4 py-3">
-                  {gift.is_available ? (
-                    <span className="text-xs font-medium text-primary">Disponível</span>
-                  ) : (
-                    <div>
-                      <span className="text-xs font-medium text-accent">Presenteado</span>
-                      {gift.guest_name && (
-                        <p className="text-xs text-muted-foreground">por {gift.guest_name}</p>
-                      )}
-                    </div>
-                  )}
-                </td>
-                <td className="px-4 py-3">
-                  <div className="flex items-center justify-end gap-1">
-                    <Button variant="ghost" size="sm" onClick={() => openEdit(gift)}>
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                    {!gift.is_available && (
-                      <Button variant="ghost" size="sm" onClick={() => handleRelease(gift.id)}>
-                        <RotateCcw className="h-3.5 w-3.5" />
-                      </Button>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => handleDelete(gift.id)} className="text-destructive hover:text-destructive">
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {gifts.length === 0 && (
-              <tr>
-                <td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">
-                  Nenhum produto adicionado ainda.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+        <TabsContent value="all">
+          <div className="overflow-x-auto rounded-lg border bg-card">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="px-4 py-3 text-left font-medium">Produto</th>
+                  <th className="hidden px-4 py-3 text-left font-medium sm:table-cell">Categoria</th>
+                  <th className="px-4 py-3 text-left font-medium">Preço</th>
+                  <th className="px-4 py-3 text-left font-medium">Status</th>
+                  <th className="px-4 py-3 text-right font-medium">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {gifts.map((gift) => renderGiftRow(gift))}
+                {gifts.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">
+                      Nenhum produto adicionado ainda.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </TabsContent>
+
+        <TabsContent value="reserved">
+          <div className="overflow-x-auto rounded-lg border bg-card">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b bg-muted/50">
+                  <th className="px-4 py-3 text-left font-medium">Produto</th>
+                  <th className="hidden px-4 py-3 text-left font-medium sm:table-cell">Categoria</th>
+                  <th className="px-4 py-3 text-left font-medium">Preço</th>
+                  <th className="px-4 py-3 text-left font-medium">Presenteado por</th>
+                  <th className="px-4 py-3 text-right font-medium">Ações</th>
+                </tr>
+              </thead>
+              <tbody>
+                {reservedGifts.map((gift) => renderGiftRow(gift))}
+                {reservedGifts.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-12 text-center text-muted-foreground">
+                      Nenhum presente foi reservado ainda.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {reservedGifts.length > 0 && (
+            <div className="mt-4 rounded-lg border bg-card p-4">
+              <p className="text-sm font-medium">
+                Total presenteado: R$ {reservedGifts.reduce((sum, g) => sum + (Number(g.price) || 0), 0).toFixed(2).replace(".", ",")}
+              </p>
+            </div>
+          )}
+        </TabsContent>
+      </Tabs>
 
       {/* Add/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
