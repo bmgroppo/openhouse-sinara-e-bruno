@@ -5,13 +5,18 @@ const corsHeaders = {
 
 async function scrapeFromMercadoLivreAPI(url: string) {
   // Extract MLB ID from URL
-  const mlbMatch = url.match(/MLB[- ]?(\d+)/i);
-  if (!mlbMatch) return null;
+  // Try multiple patterns for MLB ID
+  const mlbMatch = url.match(/MLB[-_]?(\d+)/i) || url.match(/MLB(\d+)/i);
+  if (!mlbMatch) {
+    console.log('No MLB ID found in URL:', url);
+    return null;
+  }
 
   const itemId = `MLB${mlbMatch[1]}`;
   console.log('Using MercadoLivre API for item:', itemId);
 
-  const response = await fetch(`https://api.mercadolibre.com/items/${itemId}`);
+  try {
+    const response = await fetch(`https://api.mercadolibre.com/items/${itemId}`);
   if (!response.ok) {
     console.log('ML API failed:', response.status);
     return null;
