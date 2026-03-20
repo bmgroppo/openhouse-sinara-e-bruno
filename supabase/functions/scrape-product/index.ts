@@ -229,6 +229,8 @@ Deno.serve(async (req) => {
       console.log('HTML fetch error:', e);
     }
 
+    const badTitles = ['Preferências de cookies', 'Robot Check', 'Mercado Livre', 'Mercado Libre', ''];
+
     // Step 2: For ML, try API for image if missing, and URL for title fallback
     if (isML) {
       if (!result.image_url) {
@@ -238,14 +240,14 @@ Deno.serve(async (req) => {
           console.log('Got image from ML API');
         }
       }
-      if (!result.title || result.title === 'Preferências de cookies') {
+      if (badTitles.includes(result.title)) {
         const mlData = extractFromMLUrl(url);
         if (mlData.title) result.title = mlData.title;
       }
     }
 
     // Step 3: For Amazon, extract title from URL if HTML failed
-    if (isAmazon && !result.title) {
+    if (isAmazon && badTitles.includes(result.title)) {
       const amzData = extractFromAmazonUrl(url);
       result.title = amzData.title || result.title;
     }
