@@ -252,8 +252,7 @@ Deno.serve(async (req) => {
       result.title = amzData.title || result.title;
     }
 
-    // Clean bad titles
-    if (result.title === 'Preferências de cookies' || result.title === 'Robot Check') {
+    if (badTitles.includes(result.title)) {
       result.title = '';
     }
 
