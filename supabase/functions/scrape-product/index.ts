@@ -3,17 +3,54 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-interface ProductData {
-  title: string;
-  price: string;
-  image_url: string;
+function extractFromPreloadedState(html: string) {
+  // ML embeds __PRELOADED_STATE__ in the HTML with product data
+  const stateMatch = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
+  if (!stateMatch) return null;
+
+  try {
+    const state = JSON.parse(stateMatch[1]);
+    console.log('Found __PRELOADED_STATE__, keys:', Object.keys(state).join(', '));
+    
+    // Navigate the state tree to find product info
+    const initialState = state?.initialState;
+    const components = initialState?.components;
+    
+    let title = '';
+    let price = '';
+    let image_url = '';
+
+    // Try to find title
+    if (components?.header?.title) title = components.header.title;
+    if (!title && initialState?.id) {
+      // Search for title in various paths
+      const titleComp = components?.short_description?.title || components?.header?.title;
+      if (titleComp) title = titleComp;
+    }
+
+    // Try to find price
+    const priceComp = components?.price;
+    if (priceComp?.price?.value) price = priceComp.price.value.toString();
+    if (!price && priceComp?.amount) price = priceComp.amount.toString();
+
+    // Try to find image
+    const gallery = components?.gallery;
+    if (gallery?.pictures?.[0]?.url) image_url = gallery.pictures[0].url;
+
+    if (title || price) {
+      return { title, price, image_url };
+    }
+  } catch (e) {
+    console.log('Failed to parse __PRELOADED_STATE__:', e);
+  }
+  return null;
 }
 
 async function fetchHTML(url: string): Promise<string> {
   const response = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       'Accept-Encoding': 'identity',
       'Cache-Control': 'no-cache',
@@ -28,26 +65,26 @@ async function fetchHTML(url: string): Promise<string> {
   return response.text();
 }
 
-function extractFromHTML(html: string): ProductData {
+function extractFromHTML(html: string) {
   let title = '';
   let price = '';
   let image_url = '';
 
-  // 1. JSON-LD structured data
+  // 1. Try JSON-LD structured data
   const jsonLdMatches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
   for (const match of jsonLdMatches) {
     try {
       const jsonData = JSON.parse(match[1].trim());
       const items = Array.isArray(jsonData) ? jsonData : [jsonData];
       for (const item of items) {
-        if (item['@type'] === 'Product') {
-          if (!title && item.name) title = item.name;
-          if (!image_url && item.image) {
-            image_url = Array.isArray(item.image) ? item.image[0] : (typeof item.image === 'string' ? item.image : item.image?.url || '');
+        const product = item['@type'] === 'Product' ? item : null;
+        if (product) {
+          if (!title && product.name) title = product.name;
+          if (!image_url && product.image) {
+            image_url = Array.isArray(product.image) ? product.image[0] : (typeof product.image === 'string' ? product.image : product.image?.url || '');
           }
-          if (!price && item.offers) {
-            const offers = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-            const p = offers?.price || offers?.lowPrice;
+          if (!price && product.offers) {
+            const p = product.offers.price || product.offers.lowPrice || (Array.isArray(product.offers) ? product.offers[0]?.price : null);
             if (p) price = p.toString();
           }
         }
@@ -66,19 +103,13 @@ function extractFromHTML(html: string): ProductData {
     if (m) title = m[1].trim();
   }
 
-  // 3. Amazon-specific title
-  if (!title || title.includes('Amazon')) {
-    const m = html.match(/id=["']productTitle["'][^>]*>\s*([^<]+)/i);
-    if (m && m[1].trim().length > 5) title = m[1].trim();
-  }
-
-  // 4. Price
+  // 3. Price from various patterns
   if (!price) {
     const patterns = [
       /"price"\s*:\s*"?([\d]+[.,]?\d*)"?/,
       /"lowPrice"\s*:\s*"?([\d]+[.,]?\d*)"?/,
       /itemprop=["']price["'][^>]*content=["']([\d.,]+)["']/i,
-      /R\$\s*(?:<[^>]*>)*\s*([\d]{1,3}(?:\.?\d{3})*(?:,\d{2}))/,
+      /R\$\s*([\d]{1,3}(?:\.?\d{3})*(?:,\d{2}))/,
       /data-price=["']([\d.,]+)["']/i,
     ];
     for (const pattern of patterns) {
@@ -87,7 +118,7 @@ function extractFromHTML(html: string): ProductData {
         let p = m[1];
         if (p.includes(',')) p = p.replace(/\./g, '').replace(',', '.');
         const num = parseFloat(p);
-        if (!isNaN(num) && num > 0 && num < 1000000) {
+        if (!isNaN(num) && num > 0 && num < 100000) {
           price = num.toString();
           break;
         }
@@ -95,90 +126,76 @@ function extractFromHTML(html: string): ProductData {
     }
   }
 
-  // 5. Images
+  // 4. og:image
   if (!image_url) {
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     if (m) image_url = m[1];
   }
-  if (!image_url) {
-    const m = html.match(/id=["']landingImage["'][^>]*src=["']([^"']+)["']/i)
-      || html.match(/"hiRes"\s*:\s*"([^"]+)"/);
-    if (m) image_url = m[1];
-  }
-  if (!image_url) {
-    const m = html.match(/data-a-dynamic-image=["']\{([^}]+)\}/i);
-    if (m) {
-      const imgMatch = m[1].match(/"(https:\/\/[^"]+)"/);
-      if (imgMatch) image_url = imgMatch[1];
-    }
-  }
 
-  // Clean title
+  // Decode entities
   title = title.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'");
-  title = title.replace(/\s*[-|–]\s*(Mercado Livre|Amazon\.com\.br|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '');
-  title = title.trim();
+  title = title.replace(/\s*[-|–]\s*(Mercado Livre|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '');
 
   return { title, price, image_url };
 }
 
-// Extract product info from ML URL patterns
-function extractFromMLUrl(url: string): ProductData {
+function extractMLDataFromHTML(html: string) {
+  // ML-specific: try to find product data embedded in script tags
   let title = '';
+  let price = '';
   let image_url = '';
 
-  // Extract item ID for thumbnail
-  const idMatch = url.match(/ML[AB]-?(\d+)/i);
-  if (idMatch) {
-    const itemId = `MLB${idMatch[1]}`;
-    // ML thumbnail URL pattern - reliable even when API is blocked
-    image_url = `https://http2.mlstatic.com/D_NQ_NP_${itemId}-O.webp`;
-  }
-
-  // Extract title from URL slug
-  // Pattern 1: /product-slug-_JM
-  const slugMatch = url.match(/\.com\.br\/(?:MLB-?\d+-)?([a-z0-9-]+?)(?:-_JM|\?|#|$)/i);
-  if (slugMatch && slugMatch[1]) {
-    title = slugMatch[1]
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase())
-      .trim();
-  }
-
-  // Pattern 2: /product-slug/p/MLBnnn
-  if (!title) {
-    const pMatch = url.match(/\.com\.br\/([^/?#]+?)\/p\//i);
-    if (pMatch) {
-      title = decodeURIComponent(pMatch[1])
-        .replace(/-/g, ' ')
-        .replace(/\b\w/g, c => c.toUpperCase())
-        .trim();
+  // Look for item title in ML-specific patterns
+  const titlePatterns = [
+    /"item_title"\s*:\s*"([^"]+)"/,
+    /"title"\s*:\s*"([^"]{10,200})"/,
+    /class="ui-pdp-title"[^>]*>([^<]+)</i,
+    /data-testid="pdp-title"[^>]*>([^<]+)</i,
+  ];
+  for (const p of titlePatterns) {
+    const m = html.match(p);
+    if (m && m[1].length > 5 && !m[1].includes('Mercado Livre')) {
+      title = m[1];
+      break;
     }
   }
 
-  return { title, price: '', image_url };
-}
-
-// Extract from Amazon URL
-function extractFromAmazonUrl(url: string): ProductData {
-  let title = '';
-  const slugMatch = url.match(/amazon\.com\.br\/([^/]+)\/dp\//);
-  if (slugMatch) {
-    title = decodeURIComponent(slugMatch[1]).replace(/-/g, ' ').trim();
+  // ML price patterns
+  const pricePatterns = [
+    /"price"\s*:\s*([\d]+(?:\.\d+)?)\s*[,}]/,
+    /"amount"\s*:\s*([\d]+(?:\.\d+)?)\s*[,}]/,
+    /class="andes-money-amount__fraction"[^>]*>(\d[\d.]*)</i,
+  ];
+  for (const p of pricePatterns) {
+    const m = html.match(p);
+    if (m) {
+      const num = parseFloat(m[1].replace(/\./g, ''));
+      if (!isNaN(num) && num > 0 && num < 100000) {
+        price = num.toString();
+        break;
+      }
+    }
   }
-  return { title, price: '', image_url: '' };
-}
 
-// Extract price from ML URL or page title (many ML URLs contain price)
-function extractPriceFromText(text: string): string {
-  const m = text.match(/R\$\s*([\d]{1,3}(?:[.,]?\d{3})*[.,]\d{1,2})/);
-  if (m) {
-    let p = m[1];
-    if (p.includes(',')) p = p.replace(/\./g, '').replace(',', '.');
-    const num = parseFloat(p);
-    if (!isNaN(num) && num > 0) return num.toString();
+  // ML image
+  const imgPatterns = [
+    /"pictures"\s*:\s*\[\s*\{[^}]*"url"\s*:\s*"([^"]+)"/,
+    /data-zoom="([^"]+\.jpe?g[^"]*)"/i,
+    /class="ui-pdp-image[^"]*"[^>]*src="([^"]+)"/i,
+  ];
+  for (const p of imgPatterns) {
+    const m = html.match(p);
+    if (m) {
+      image_url = m[1];
+      break;
+    }
   }
-  return '';
+
+  if (title || price) {
+    return { title, price, image_url };
+  }
+  return null;
 }
 
 Deno.serve(async (req) => {
@@ -197,61 +214,31 @@ Deno.serve(async (req) => {
 
     console.log('Processing URL:', url);
 
+    const html = await fetchHTML(url);
+    console.log('HTML length:', html.length);
+
+    let result = null;
     const isML = url.includes('mercadolivre.com.br') || url.includes('mercadolibre.com');
-    const isAmazon = url.includes('amazon.com.br');
-    let result: ProductData = { title: '', price: '', image_url: '' };
 
-    // Step 1: Try HTML scraping (works for Amazon, Havan, Shopee, etc.)
-    try {
-      const html = await fetchHTML(url);
-      console.log('HTML length:', html.length);
+    if (isML) {
+      // Try __PRELOADED_STATE__ first
+      result = extractFromPreloadedState(html);
+      if (result) console.log('Got data from __PRELOADED_STATE__');
 
-      const isBlocked = html.includes('Preferências de cookies') ||
-                        html.includes('Robot Check') ||
-                        html.length < 3000;
-
-      if (!isBlocked) {
-        result = extractFromHTML(html);
-        if (result.title) {
-          console.log('SUCCESS via HTML scraping');
-        }
-      } else {
-        console.log('Page blocked by anti-bot');
-      }
-    } catch (e) {
-      console.log('HTML fetch error:', e);
-    }
-
-    // Step 2: For ML, extract from URL (title + thumbnail image)
-    if (isML && (!result.title || result.title.includes('Preferências'))) {
-      const mlData = extractFromMLUrl(url);
-      result.title = mlData.title || result.title;
-      result.image_url = mlData.image_url || result.image_url;
-      if (mlData.title) console.log('Got ML data from URL:', mlData.title.substring(0, 60));
-    }
-
-    // Step 3: For Amazon, extract title from URL if HTML failed
-    if (isAmazon && !result.title) {
-      const amzData = extractFromAmazonUrl(url);
-      result.title = amzData.title || result.title;
-    }
-
-    // Clean bad titles
-    if (result.title === 'Preferências de cookies' || result.title === 'Robot Check') {
-      result.title = '';
-      // Try URL slug as final fallback
-      if (isML) {
-        const mlData = extractFromMLUrl(url);
-        result.title = mlData.title;
-        result.image_url = result.image_url || mlData.image_url;
+      // Try ML-specific HTML patterns
+      if (!result || !result.title) {
+        result = extractMLDataFromHTML(html);
+        if (result) console.log('Got data from ML HTML patterns');
       }
     }
 
-    console.log('Final:', JSON.stringify({
-      title: result.title?.substring(0, 80),
-      price: result.price,
-      has_image: !!result.image_url
-    }));
+    // Generic HTML extraction as fallback
+    if (!result || !result.title) {
+      result = extractFromHTML(html);
+      console.log('Got data from generic HTML extraction');
+    }
+
+    console.log('Final:', JSON.stringify({ title: result.title?.substring(0, 60), price: result.price, has_image: !!result.image_url }));
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
