@@ -180,6 +180,10 @@ function extractFromSlug(url: string): { title: string } {
     const title = slug
       .replace(/[-_]/g, ' ')
       .replace(/\b(p|dp|ref|MLB|MLA|gp)\b/gi, '')
+      // Remove Shopee-style IDs (i.XXXXX.XXXXX)
+      .replace(/\s*i\.\d+\.\d+$/i, '')
+      // Remove trailing numeric IDs
+      .replace(/\s+\d{6,}$/g, '')
       .replace(/\s+/g, ' ')
       .trim();
     if (title.length > 10) {
