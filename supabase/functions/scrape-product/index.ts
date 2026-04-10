@@ -231,6 +231,9 @@ Deno.serve(async (req) => {
       if (slug.title) title = slug.title;
     }
 
+    // Final cleanup: if title is still garbage, clear it
+    if (isGarbageTitle(title)) title = '';
+
     const result = { title, price, image_url };
     console.log('Final:', JSON.stringify({ title: title?.substring(0, 60), price, has_image: !!image_url }));
 
