@@ -3,88 +3,121 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-function extractFromPreloadedState(html: string) {
-  // ML embeds __PRELOADED_STATE__ in the HTML with product data
-  const stateMatch = html.match(/window\.__PRELOADED_STATE__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
-  if (!stateMatch) return null;
-
-  try {
-    const state = JSON.parse(stateMatch[1]);
-    console.log('Found __PRELOADED_STATE__, keys:', Object.keys(state).join(', '));
-    
-    // Navigate the state tree to find product info
-    const initialState = state?.initialState;
-    const components = initialState?.components;
-    
-    let title = '';
-    let price = '';
-    let image_url = '';
-
-    // Try to find title
-    if (components?.header?.title) title = components.header.title;
-    if (!title && initialState?.id) {
-      // Search for title in various paths
-      const titleComp = components?.short_description?.title || components?.header?.title;
-      if (titleComp) title = titleComp;
+function extractPriceFromText(text: string): string {
+  // BRL patterns: R$ 1.234,56 or R$ 234,56 or R$234.56
+  const patterns = [
+    /R\$\s*([\d]{1,3}(?:\.?\d{3})*(?:,\d{2}))/,
+    /R\$\s*([\d]+[.,]?\d*)/,
+    /"price"\s*:\s*"?([\d]+(?:[.,]\d+)?)"?/,
+    /"lowPrice"\s*:\s*"?([\d]+(?:[.,]\d+)?)"?/,
+  ];
+  for (const pattern of patterns) {
+    const m = text.match(pattern);
+    if (m) {
+      let p = m[1];
+      if (p.includes(',')) p = p.replace(/\./g, '').replace(',', '.');
+      const num = parseFloat(p);
+      if (!isNaN(num) && num > 0 && num < 100000) return num.toString();
     }
-
-    // Try to find price
-    const priceComp = components?.price;
-    if (priceComp?.price?.value) price = priceComp.price.value.toString();
-    if (!price && priceComp?.amount) price = priceComp.amount.toString();
-
-    // Try to find image
-    const gallery = components?.gallery;
-    if (gallery?.pictures?.[0]?.url) image_url = gallery.pictures[0].url;
-
-    if (title || price) {
-      return { title, price, image_url };
-    }
-  } catch (e) {
-    console.log('Failed to parse __PRELOADED_STATE__:', e);
   }
+  return '';
+}
+
+function cleanTitle(title: string): string {
+  return title
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
+    .replace(/\s*[-|–]\s*(Mercado Livre|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '')
+    .trim();
+}
+
+async function scrapeWithFirecrawl(url: string): Promise<{ title: string; price: string; image_url: string } | null> {
+  const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
+  if (!apiKey) {
+    console.log('No FIRECRAWL_API_KEY, skipping Firecrawl');
+    return null;
+  }
+
+  console.log('Trying Firecrawl for:', url);
+  const response = await fetch('https://api.firecrawl.dev/v1/scrape', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      url,
+      formats: ['markdown'],
+      onlyMainContent: true,
+      waitFor: 3000,
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    console.error('Firecrawl error:', response.status, err);
+    return null;
+  }
+
+  const data = await response.json();
+  const metadata = data?.data?.metadata || data?.metadata || {};
+  const markdown = data?.data?.markdown || data?.markdown || '';
+
+  console.log('Firecrawl metadata keys:', Object.keys(metadata).join(', '));
+
+  const title = cleanTitle(metadata.ogTitle || metadata.title || '');
+  const image_url = metadata.ogImage || '';
+  let price = '';
+
+  // Try price from metadata (some sites include it)
+  if (metadata.price) {
+    price = metadata.price.toString();
+  }
+
+  // Extract price from markdown content
+  if (!price && markdown) {
+    price = extractPriceFromText(markdown);
+  }
+
+  if (title || price || image_url) {
+    console.log('Firecrawl success:', { title: title.substring(0, 60), price, hasImage: !!image_url });
+    return { title, price, image_url };
+  }
+
+  console.log('Firecrawl returned no useful data');
   return null;
 }
 
-async function fetchHTML(url: string): Promise<string> {
+async function scrapeWithFetch(url: string): Promise<{ title: string; price: string; image_url: string }> {
   const response = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
       'Accept-Encoding': 'identity',
-      'Cache-Control': 'no-cache',
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1',
     },
     redirect: 'follow',
   });
-  return response.text();
-}
+  const html = await response.text();
+  console.log('Fallback fetch HTML length:', html.length);
 
-function extractFromHTML(html: string) {
   let title = '';
   let price = '';
   let image_url = '';
 
-  // 1. Try JSON-LD structured data
+  // JSON-LD
   const jsonLdMatches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
   for (const match of jsonLdMatches) {
     try {
       const jsonData = JSON.parse(match[1].trim());
       const items = Array.isArray(jsonData) ? jsonData : [jsonData];
       for (const item of items) {
-        const product = item['@type'] === 'Product' ? item : null;
-        if (product) {
-          if (!title && product.name) title = product.name;
-          if (!image_url && product.image) {
-            image_url = Array.isArray(product.image) ? product.image[0] : (typeof product.image === 'string' ? product.image : product.image?.url || '');
+        if (item['@type'] === 'Product') {
+          if (!title && item.name) title = item.name;
+          if (!image_url && item.image) {
+            image_url = Array.isArray(item.image) ? item.image[0] : (typeof item.image === 'string' ? item.image : item.image?.url || '');
           }
-          if (!price && product.offers) {
-            const p = product.offers.price || product.offers.lowPrice || (Array.isArray(product.offers) ? product.offers[0]?.price : null);
+          if (!price && item.offers) {
+            const p = item.offers.price || item.offers.lowPrice || (Array.isArray(item.offers) ? item.offers[0]?.price : null);
             if (p) price = p.toString();
           }
         }
@@ -92,110 +125,24 @@ function extractFromHTML(html: string) {
     } catch { /* ignore */ }
   }
 
-  // 2. Meta tags
+  // Meta tags
   if (!title) {
     const m = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
-      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i);
-    if (m) title = m[1].trim();
-  }
-  if (!title) {
-    const m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)
+      || html.match(/<title[^>]*>([^<]+)<\/title>/i);
     if (m) title = m[1].trim();
   }
 
-  // 3. Price from various patterns
-  if (!price) {
-    const patterns = [
-      /"price"\s*:\s*"?([\d]+[.,]?\d*)"?/,
-      /"lowPrice"\s*:\s*"?([\d]+[.,]?\d*)"?/,
-      /itemprop=["']price["'][^>]*content=["']([\d.,]+)["']/i,
-      /R\$\s*([\d]{1,3}(?:\.?\d{3})*(?:,\d{2}))/,
-      /data-price=["']([\d.,]+)["']/i,
-    ];
-    for (const pattern of patterns) {
-      const m = html.match(pattern);
-      if (m) {
-        let p = m[1];
-        if (p.includes(',')) p = p.replace(/\./g, '').replace(',', '.');
-        const num = parseFloat(p);
-        if (!isNaN(num) && num > 0 && num < 100000) {
-          price = num.toString();
-          break;
-        }
-      }
-    }
-  }
+  if (!price) price = extractPriceFromText(html);
 
-  // 4. og:image
   if (!image_url) {
     const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     if (m) image_url = m[1];
   }
 
-  // Decode entities
-  title = title.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'");
-  title = title.replace(/\s*[-|–]\s*(Mercado Livre|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '');
-
+  title = cleanTitle(title);
   return { title, price, image_url };
-}
-
-function extractMLDataFromHTML(html: string) {
-  // ML-specific: try to find product data embedded in script tags
-  let title = '';
-  let price = '';
-  let image_url = '';
-
-  // Look for item title in ML-specific patterns
-  const titlePatterns = [
-    /"item_title"\s*:\s*"([^"]+)"/,
-    /"title"\s*:\s*"([^"]{10,200})"/,
-    /class="ui-pdp-title"[^>]*>([^<]+)</i,
-    /data-testid="pdp-title"[^>]*>([^<]+)</i,
-  ];
-  for (const p of titlePatterns) {
-    const m = html.match(p);
-    if (m && m[1].length > 5 && !m[1].includes('Mercado Livre')) {
-      title = m[1];
-      break;
-    }
-  }
-
-  // ML price patterns
-  const pricePatterns = [
-    /"price"\s*:\s*([\d]+(?:\.\d+)?)\s*[,}]/,
-    /"amount"\s*:\s*([\d]+(?:\.\d+)?)\s*[,}]/,
-    /class="andes-money-amount__fraction"[^>]*>(\d[\d.]*)</i,
-  ];
-  for (const p of pricePatterns) {
-    const m = html.match(p);
-    if (m) {
-      const num = parseFloat(m[1].replace(/\./g, ''));
-      if (!isNaN(num) && num > 0 && num < 100000) {
-        price = num.toString();
-        break;
-      }
-    }
-  }
-
-  // ML image
-  const imgPatterns = [
-    /"pictures"\s*:\s*\[\s*\{[^}]*"url"\s*:\s*"([^"]+)"/,
-    /data-zoom="([^"]+\.jpe?g[^"]*)"/i,
-    /class="ui-pdp-image[^"]*"[^>]*src="([^"]+)"/i,
-  ];
-  for (const p of imgPatterns) {
-    const m = html.match(p);
-    if (m) {
-      image_url = m[1];
-      break;
-    }
-  }
-
-  if (title || price) {
-    return { title, price, image_url };
-  }
-  return null;
 }
 
 Deno.serve(async (req) => {
@@ -214,28 +161,18 @@ Deno.serve(async (req) => {
 
     console.log('Processing URL:', url);
 
-    const html = await fetchHTML(url);
-    console.log('HTML length:', html.length);
+    // 1. Try Firecrawl first
+    let result = await scrapeWithFirecrawl(url);
 
-    let result = null;
-    const isML = url.includes('mercadolivre.com.br') || url.includes('mercadolibre.com');
-
-    if (isML) {
-      // Try __PRELOADED_STATE__ first
-      result = extractFromPreloadedState(html);
-      if (result) console.log('Got data from __PRELOADED_STATE__');
-
-      // Try ML-specific HTML patterns
-      if (!result || !result.title) {
-        result = extractMLDataFromHTML(html);
-        if (result) console.log('Got data from ML HTML patterns');
-      }
-    }
-
-    // Generic HTML extraction as fallback
+    // 2. Fallback to direct fetch
     if (!result || !result.title) {
-      result = extractFromHTML(html);
-      console.log('Got data from generic HTML extraction');
+      console.log('Falling back to direct fetch');
+      const fallback = await scrapeWithFetch(url);
+      result = {
+        title: result?.title || fallback.title,
+        price: result?.price || fallback.price,
+        image_url: result?.image_url || fallback.image_url,
+      };
     }
 
     console.log('Final:', JSON.stringify({ title: result.title?.substring(0, 60), price: result.price, has_image: !!result.image_url }));
