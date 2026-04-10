@@ -6,7 +6,8 @@ const corsHeaders = {
 const GARBAGE_PATTERNS = [
   /mercado\s*li[bv]re/i, /^amazon/i, /^shopee/i, /page\s*not\s*found/i,
   /n[aã]o\s*foi\s*poss[ií]vel/i, /access\s*denied/i, /robot/i, /captcha/i,
-  /just\s*a\s*moment/i, /verifica[cç][aã]o/i, /^login$/i, /erro\s/i,
+  /just\s*a\s*moment/i, /verifica[cç][aã]o/i, /fa[cç]a\s*login/i, /^login$/i,
+  /comece\s*suas\s*compras/i, /erro\s/i, /encontrar\s*esta\s*p[aá]gina/i,
 ];
 
 function isGarbageTitle(title: string): boolean {
