@@ -46,9 +46,10 @@ async function scrapeWithFirecrawl(url: string): Promise<{ title: string; price:
     },
     body: JSON.stringify({
       url,
-      formats: ['markdown'],
-      onlyMainContent: true,
-      waitFor: 3000,
+      formats: ['markdown', 'html'],
+      onlyMainContent: false,
+      waitFor: 5000,
+      location: { country: 'BR', languages: ['pt-BR'] },
     }),
   });
 
