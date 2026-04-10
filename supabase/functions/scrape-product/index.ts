@@ -3,16 +3,16 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
-const GARBAGE_TITLES = [
-  'mercado libre', 'mercado livre', 'amazon', 'shopee', 'page not found',
-  'não foi possível', 'error', 'access denied', 'robot', 'captcha',
-  'just a moment', 'verificação', 'login',
+const GARBAGE_PATTERNS = [
+  /mercado\s*li[bv]re/i, /^amazon/i, /^shopee/i, /page\s*not\s*found/i,
+  /n[aã]o\s*foi\s*poss[ií]vel/i, /access\s*denied/i, /robot/i, /captcha/i,
+  /just\s*a\s*moment/i, /verifica[cç][aã]o/i, /^login$/i, /erro\s/i,
 ];
 
 function isGarbageTitle(title: string): boolean {
-  const lower = title.toLowerCase().trim();
-  if (lower.length < 5) return true;
-  return GARBAGE_TITLES.some(g => lower.includes(g));
+  const t = title.trim();
+  if (t.length < 5) return true;
+  return GARBAGE_PATTERNS.some(p => p.test(t));
 }
 
 function extractPriceFromText(text: string): string {
