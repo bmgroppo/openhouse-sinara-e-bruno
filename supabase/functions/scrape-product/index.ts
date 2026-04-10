@@ -3,11 +3,22 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
 };
 
+const GARBAGE_TITLES = [
+  'mercado libre', 'mercado livre', 'amazon', 'shopee', 'page not found',
+  'não foi possível', 'error', 'access denied', 'robot', 'captcha',
+  'just a moment', 'verificação', 'login',
+];
+
+function isGarbageTitle(title: string): boolean {
+  const lower = title.toLowerCase().trim();
+  if (lower.length < 5) return true;
+  return GARBAGE_TITLES.some(g => lower === g || lower.startsWith(g + ' -') || lower.startsWith(g + ' |'));
+}
+
 function extractPriceFromText(text: string): string {
-  // BRL patterns: R$ 1.234,56 or R$ 234,56 or R$234.56
   const patterns = [
-    /R\$\s*([\d]{1,3}(?:\.?\d{3})*(?:,\d{2}))/,
-    /R\$\s*([\d]+[.,]?\d*)/,
+    /R\$\s*([\d]{1,3}(?:\.\d{3})*,\d{2})/,
+    /R\$\s*([\d]+,\d{2})/,
     /"price"\s*:\s*"?([\d]+(?:[.,]\d+)?)"?/,
     /"lowPrice"\s*:\s*"?([\d]+(?:[.,]\d+)?)"?/,
   ];
@@ -26,14 +37,61 @@ function extractPriceFromText(text: string): string {
 function cleanTitle(title: string): string {
   return title
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/g, "'")
-    .replace(/\s*[-|–]\s*(Mercado Livre|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '')
+    .replace(/\s*[-|–]\s*(Mercado Livre|Mercado Libre|Amazon\.com\.br|Amazon|Shopee|Magazine Luiza|Americanas|Casas Bahia|Havan|Submarino).*$/i, '')
     .trim();
+}
+
+function extractFromHTML(html: string): { title: string; price: string; image_url: string } {
+  let title = '';
+  let price = '';
+  let image_url = '';
+
+  // JSON-LD
+  const jsonLdMatches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
+  for (const match of jsonLdMatches) {
+    try {
+      const jsonData = JSON.parse(match[1].trim());
+      const items = Array.isArray(jsonData) ? jsonData : [jsonData];
+      for (const item of items) {
+        if (item['@type'] === 'Product') {
+          if (!title && item.name) title = item.name;
+          if (!image_url && item.image) {
+            image_url = Array.isArray(item.image) ? item.image[0] : (typeof item.image === 'string' ? item.image : item.image?.url || '');
+          }
+          if (!price && item.offers) {
+            const p = item.offers.price || item.offers.lowPrice || (Array.isArray(item.offers) ? item.offers[0]?.price : null);
+            if (p) price = p.toString();
+          }
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // og:title
+  if (!title) {
+    const m = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)
+      || html.match(/<title[^>]*>([^<]+)<\/title>/i);
+    if (m) title = m[1].trim();
+  }
+
+  if (!price) price = extractPriceFromText(html);
+
+  // og:image
+  if (!image_url) {
+    const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    if (m) image_url = m[1];
+  }
+
+  title = cleanTitle(title);
+  return { title, price, image_url };
 }
 
 async function scrapeWithFirecrawl(url: string): Promise<{ title: string; price: string; image_url: string } | null> {
   const apiKey = Deno.env.get('FIRECRAWL_API_KEY');
   if (!apiKey) {
-    console.log('No FIRECRAWL_API_KEY, skipping Firecrawl');
+    console.log('No FIRECRAWL_API_KEY, skipping');
     return null;
   }
 
@@ -62,25 +120,34 @@ async function scrapeWithFirecrawl(url: string): Promise<{ title: string; price:
   const data = await response.json();
   const metadata = data?.data?.metadata || data?.metadata || {};
   const markdown = data?.data?.markdown || data?.markdown || '';
+  const html = data?.data?.html || data?.html || '';
 
-  console.log('Firecrawl metadata keys:', Object.keys(metadata).join(', '));
+  console.log('Firecrawl metadata:', JSON.stringify({ title: metadata.title, ogTitle: metadata.ogTitle, ogImage: metadata.ogImage?.substring(0, 80), statusCode: metadata.statusCode }));
+  console.log('Firecrawl markdown length:', markdown.length, 'html length:', html.length);
 
-  const title = cleanTitle(metadata.ogTitle || metadata.title || '');
-  const image_url = metadata.ogImage || '';
+  // Try metadata first
+  let title = cleanTitle(metadata.ogTitle || metadata.title || '');
+  let image_url = metadata.ogImage || '';
   let price = '';
 
-  // Try price from metadata (some sites include it)
-  if (metadata.price) {
-    price = metadata.price.toString();
+  // If we got HTML from Firecrawl, parse it for structured data
+  if (html) {
+    const htmlResult = extractFromHTML(html);
+    if (!title || isGarbageTitle(title)) title = htmlResult.title;
+    if (!price) price = htmlResult.price;
+    if (!image_url) image_url = htmlResult.image_url;
   }
 
-  // Extract price from markdown content
+  // Extract price from markdown
   if (!price && markdown) {
     price = extractPriceFromText(markdown);
   }
 
+  // Validate result
+  if (isGarbageTitle(title)) title = '';
+
   if (title || price || image_url) {
-    console.log('Firecrawl success:', { title: title.substring(0, 60), price, hasImage: !!image_url });
+    console.log('Firecrawl result:', { title: title.substring(0, 60), price, hasImage: !!image_url });
     return { title, price, image_url };
   }
 
@@ -99,51 +166,26 @@ async function scrapeWithFetch(url: string): Promise<{ title: string; price: str
     redirect: 'follow',
   });
   const html = await response.text();
-  console.log('Fallback fetch HTML length:', html.length);
+  console.log('Fallback HTML length:', html.length);
+  return extractFromHTML(html);
+}
 
-  let title = '';
-  let price = '';
-  let image_url = '';
-
-  // JSON-LD
-  const jsonLdMatches = html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi);
-  for (const match of jsonLdMatches) {
-    try {
-      const jsonData = JSON.parse(match[1].trim());
-      const items = Array.isArray(jsonData) ? jsonData : [jsonData];
-      for (const item of items) {
-        if (item['@type'] === 'Product') {
-          if (!title && item.name) title = item.name;
-          if (!image_url && item.image) {
-            image_url = Array.isArray(item.image) ? item.image[0] : (typeof item.image === 'string' ? item.image : item.image?.url || '');
-          }
-          if (!price && item.offers) {
-            const p = item.offers.price || item.offers.lowPrice || (Array.isArray(item.offers) ? item.offers[0]?.price : null);
-            if (p) price = p.toString();
-          }
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  // Meta tags
-  if (!title) {
-    const m = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)
-      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)
-      || html.match(/<title[^>]*>([^<]+)<\/title>/i);
-    if (m) title = m[1].trim();
-  }
-
-  if (!price) price = extractPriceFromText(html);
-
-  if (!image_url) {
-    const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
-      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
-    if (m) image_url = m[1];
-  }
-
-  title = cleanTitle(title);
-  return { title, price, image_url };
+// Extract product info from URL slug as last resort
+function extractFromSlug(url: string): { title: string } {
+  try {
+    const pathname = new URL(url).pathname;
+    const segments = pathname.split('/').filter(s => s.length > 5 && !s.match(/^[A-Z0-9]{10,}$/));
+    const slug = segments.pop() || '';
+    const title = slug
+      .replace(/[-_]/g, ' ')
+      .replace(/\b(p|dp|ref|MLB|MLA|gp)\b/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (title.length > 10) {
+      return { title: title.charAt(0).toUpperCase() + title.slice(1) };
+    }
+  } catch { /* ignore */ }
+  return { title: '' };
 }
 
 Deno.serve(async (req) => {
@@ -162,21 +204,35 @@ Deno.serve(async (req) => {
 
     console.log('Processing URL:', url);
 
-    // 1. Try Firecrawl first
-    let result = await scrapeWithFirecrawl(url);
+    let title = '';
+    let price = '';
+    let image_url = '';
 
-    // 2. Fallback to direct fetch
-    if (!result || !result.title) {
-      console.log('Falling back to direct fetch');
-      const fallback = await scrapeWithFetch(url);
-      result = {
-        title: result?.title || fallback.title,
-        price: result?.price || fallback.price,
-        image_url: result?.image_url || fallback.image_url,
-      };
+    // 1. Firecrawl
+    const fc = await scrapeWithFirecrawl(url);
+    if (fc) {
+      title = fc.title;
+      price = fc.price;
+      image_url = fc.image_url;
     }
 
-    console.log('Final:', JSON.stringify({ title: result.title?.substring(0, 60), price: result.price, has_image: !!result.image_url }));
+    // 2. Direct fetch fallback
+    if (!title || !price) {
+      console.log('Trying direct fetch fallback');
+      const fb = await scrapeWithFetch(url);
+      if (!title || isGarbageTitle(title)) title = fb.title;
+      if (!price) price = fb.price;
+      if (!image_url) image_url = fb.image_url;
+    }
+
+    // 3. URL slug as last resort for title
+    if (!title || isGarbageTitle(title)) {
+      const slug = extractFromSlug(url);
+      if (slug.title) title = slug.title;
+    }
+
+    const result = { title, price, image_url };
+    console.log('Final:', JSON.stringify({ title: title?.substring(0, 60), price, has_image: !!image_url }));
 
     return new Response(JSON.stringify(result), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
