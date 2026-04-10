@@ -12,7 +12,7 @@ const GARBAGE_TITLES = [
 function isGarbageTitle(title: string): boolean {
   const lower = title.toLowerCase().trim();
   if (lower.length < 5) return true;
-  return GARBAGE_TITLES.some(g => lower === g || lower.startsWith(g + ' -') || lower.startsWith(g + ' |'));
+  return GARBAGE_TITLES.some(g => lower.includes(g));
 }
 
 function extractPriceFromText(text: string): string {
